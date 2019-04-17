@@ -1,5 +1,6 @@
 package com.example.fuseao;
 
+import android.Manifest;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothSocket;
@@ -7,10 +8,13 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.SystemClock;
+import android.support.v4.app.ActivityCompat;
 import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
@@ -22,6 +26,9 @@ import android.widget.NumberPicker;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -44,10 +51,18 @@ public class MainActivity extends AppCompatActivity {
     private ListView mDevicesListView;
     private EditText mLED1;
     private Button send;
+    private Button recieve;
 
     private Handler mHandler; // Our main handler that will receive callback notifications
     private ConnectedThread mConnectedThread; // bluetooth background worker thread to send and receive data
     private BluetoothSocket mBTSocket = null; // bi-directional client-to-client data path
+    private File mfile;
+    private File mDir;
+    private FileOutputStream out;
+    private boolean checkinput = false;
+    private boolean sucess=true;
+
+
 
     private static final UUID BTMODULEUUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB"); // "random" unique identifier
 
@@ -62,6 +77,8 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        ActivityCompat.requestPermissions(this,
+                new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},1);
 
         mBluetoothStatus = findViewById(R.id.bluetoothStatus);
         mReadBuffer = findViewById(R.id.readBuffer);
@@ -71,10 +88,13 @@ public class MainActivity extends AppCompatActivity {
         mListPairedDevicesBtn = findViewById(R.id.PairedBtn);
         mLED1 = findViewById(R.id.number);
         send = findViewById(R.id.Send);
+        recieve = findViewById(R.id.recieve);
 
 
         mBTArrayAdapter = new ArrayAdapter<String>(this,android.R.layout.simple_list_item_1);
         mBTAdapter = BluetoothAdapter.getDefaultAdapter(); // get a handle on the bluetooth radio
+        mfile = new File(Environment.getExternalStorageDirectory() + File.separator + "DCIM/work_data","testAppli.txt");
+
 
         mDevicesListView = (ListView)findViewById(R.id.devicesListView);
         mDevicesListView.setAdapter(mBTArrayAdapter); // assign model to view
@@ -91,6 +111,14 @@ public class MainActivity extends AppCompatActivity {
                         readMessage = new String((byte[]) msg.obj, "UTF-8");
                     } catch (UnsupportedEncodingException e) {
                         e.printStackTrace();
+                    }
+                    if (checkinput){
+                        try {
+                            //todo traitement input
+                            out.write(Integer.parseInt(readMessage));
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
                     }
                     mReadBuffer.setText(readMessage);
                 }
@@ -110,12 +138,29 @@ public class MainActivity extends AppCompatActivity {
             Toast.makeText(getApplicationContext(),"Bluetooth device not found!",Toast.LENGTH_SHORT).show();
         }
         else {
-
+            //Todo listener pour chaque action a prévoir et coupler avec l'envoie de commande protocole
             send.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
                     if(mConnectedThread != null) //First check to make sure thread created
                         mConnectedThread.write(String.valueOf(mLED1.getText()));
+                }
+            });
+
+            recieve.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    if (sucess){
+
+                        try {
+                           out = new FileOutputStream(mfile,true); //le true est pour écrire en fin de fichier, et non l'écraser
+                            checkinput = true;
+                        } catch (FileNotFoundException e) {
+                            e.printStackTrace();
+                        }
+                    }
+                    else {
+                        Log.e("TEST1","ERROR DE CREATION DE DOSSIER");}
                 }
             });
 
@@ -293,11 +338,17 @@ public class MainActivity extends AppCompatActivity {
         private final BluetoothSocket mmSocket;
         private final InputStream mmInStream;
         private final OutputStream mmOutStream;
+        byte[] buffer = new byte[1024];  // buffer store for the stream
+        int byteread; // bytes returned from read()
+        private boolean rcData=false;
+        private int bufflen;
+        private int nbyte;
 
         public ConnectedThread(BluetoothSocket socket) {
             mmSocket = socket;
             InputStream tmpIn = null;
             OutputStream tmpOut = null;
+
 
             // Get the input and output streams, using temp objects because
             // member streams are final
@@ -311,26 +362,48 @@ public class MainActivity extends AppCompatActivity {
         }
 
         public void run() {
-            byte[] buffer = new byte[1024];  // buffer store for the stream
-            int bytes; // bytes returned from read()
             // Keep listening to the InputStream until an exception occurs
             while (true) {
                 try {
                     // Read from the InputStream
-                    bytes = mmInStream.available();
-                    if(bytes != 0) {
-                        SystemClock.sleep(100); //pause and wait for rest of data. Adjust this depending on your sending speed.
-                        bytes = mmInStream.available(); // how many bytes are ready to be read?
-                        bytes = mmInStream.read(buffer, 0, bytes); // record how many bytes we actually read
-                        mHandler.obtainMessage(MESSAGE_READ, bytes, -1, buffer)
-                                .sendToTarget(); // Send the obtained bytes to the UI activity
-                    }
+                    checkPTC();
+                    SystemClock.sleep(100); //pause and wait for rest of data. Adjust this depending on your sending speed.
+
                 } catch (IOException e) {
                     e.printStackTrace();
 
                     break;
                 }
+                if(rcData)
+                    fnRcData();
             }
+        }
+
+        private void fnRcData() {
+            //TODO refaire filtre dans activityMain probleme d'héritage!!
+            mHandler.obtainMessage(MESSAGE_READ, byteread, -1, buffer)
+                    .sendToTarget(); // Send the obtained bytes to the UI activity
+
+        }
+
+        private void checkPTC() throws IOException {
+            while(mmInStream.available()!=0){
+                byteread = mmInStream.read();
+                if (byteread==(byte) '<'){
+                    rcData=true;
+                    buffer[0]= (byte) byteread;
+                    bufflen++;
+                }
+                else if(byteread== (byte) '>'){
+                    buffer[bufflen]= (byte) byteread;
+                    break;
+                }
+                else if (bufflen>1){
+                    buffer[bufflen]= (byte) byteread;
+                }
+                //TODO limiteur de chaine a définir selon protocole de reception
+            }
+            rcData=true;
         }
 
         /* Call this from the main activity to send data to the remote device */
@@ -346,6 +419,17 @@ public class MainActivity extends AppCompatActivity {
             try {
                 mmSocket.close();
             } catch (IOException e) { }
+        }
+
+    }
+    public void onStop() {
+        super.onStop();
+        if (out!=null)
+            try {
+                out.close();
+
+        } catch (IOException e) {
+            e.printStackTrace();
         }
     }
 }
